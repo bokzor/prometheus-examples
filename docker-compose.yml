@@ -1,0 +1,228 @@
+version: '3.7'
+
+volumes:
+    prometheus_data: {}
+    grafana_data: {}
+    solr_data: {}
+
+networks:
+  front-tier:
+  back-tier:
+
+services:
+
+  prometheus:
+    image: prom/prometheus:v2.1.0
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - 9090:9090
+    links:
+#      - cadvisor:cadvisor
+      - alertmanager:alertmanager
+    # depends_on:
+#      - cadvisor
+    networks:
+      - back-tier
+    restart: always
+#    deploy:
+#      placement:
+#        constraints:
+#          - node.hostname == ${HOSTNAME}
+
+  # node-exporter:
+  #   image: prom/node-exporter
+  #   volumes:
+  #     - /proc:/host/proc:ro
+  #     - /sys:/host/sys:ro
+  #     - /:/rootfs:ro
+  #   command: 
+  #     - '--path.procfs=/host/proc' 
+  #     - '--path.sysfs=/host/sys'
+  #     - --collector.filesystem.ignored-mount-points
+  #     - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+  #   ports:
+  #     - 9100:9100
+  #   networks:
+  #     - back-tier
+  #   restart: always
+  #   deploy:
+  #     mode: global
+
+  alertmanager:
+    image: prom/alertmanager
+    ports:
+      - 9093:9093
+    volumes:
+      - ./alertmanager/:/etc/alertmanager/
+    networks:
+      - back-tier
+    restart: always
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+#    deploy:
+#      placement:
+#        constraints:
+#          - node.hostname == ${HOSTNAME}
+  # cadvisor:
+  #   image: google/cadvisor
+  #   volumes:
+  #     - /:/rootfs:ro
+  #     - /var/run:/var/run:rw
+  #     - /sys:/sys:ro
+  #     - /var/lib/docker/:/var/lib/docker:ro
+  #   ports:
+  #     - 8080:8080
+  #   networks:
+  #     - back-tier
+  #   restart: always
+  #   deploy:
+  #     mode: global
+
+  grafana:
+    image: grafana/grafana
+    user: "104"
+    depends_on:
+      - prometheus
+    ports:
+      - 3000:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring
+    networks:
+      - back-tier
+      - front-tier
+    restart: always
+
+  postgresql-server:
+    image: library/postgres:9.6
+    ports:
+      - 5432:5432
+    networks:
+      - back-tier
+    environment:
+      - POSTGRES_PASSWORD=secretpassword
+
+  postgresql-exporter:
+    image: wrouesnel/postgres_exporter:v0.5.1
+    ports:
+      - 9187:9187
+    networks:
+      - back-tier
+    depends_on:
+      - postgresql-server
+    environment:
+      # very insecure client connection
+      - DATA_SOURCE_NAME=postgresql://postgres:secretpassword@postgresql-server:5432/?sslmode=disable
+
+  solr:
+    image: solr:8
+    ports:
+     - "8983:8983"
+    volumes:
+      - solr_data:/var/solr
+    command:
+      - solr-demo
+    networks:
+      - back-tier     
+      
+  solr-exporter:
+    image: solr:8
+    ports:
+     - "9854:9854"
+    entrypoint:
+      - "/opt/solr-8.2.0/contrib/prometheus-exporter/bin/solr-exporter"
+      - "-p"
+      - "9854"
+      - "-b"
+      - "http://solr:8983/solr"
+      - "-f"
+      - "/opt/solr-8.2.0/contrib/prometheus-exporter/conf/solr-exporter-config.xml"
+      - "-n"
+      - "8"
+    depends_on:
+      - solr
+    networks:
+      - back-tier
+
+
+  zookeeper:
+    container_name: zookeeper
+    image: wurstmeister/zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports:
+    - "2181:2181"
+    networks:
+      - back-tier
+
+  kafka_consumer:
+    build:
+      context: kafka
+      dockerfile: Dockerfile-consumer
+    ports:
+      - "8081:8081" 
+    networks:
+      - back-tier
+
+  kafka_producer:
+    build:
+      context: kafka
+      dockerfile: Dockerfile-producer
+    ports:
+      - "8085:8085" 
+    networks:
+      - back-tier
+
+
+  kafka:
+    container_name: kafka
+    image: wurstmeister/kafka
+    environment:
+      KAFKA_LISTENERS: >-
+        LISTENER_DOCKER_INTERNAL://kafka:19092,
+        LISTENER_DOCKER_EXTERNAL://kafka:9092
+      KAFKA_ADVERTISED_LISTENERS: >- 
+        LISTENER_DOCKER_INTERNAL://kafka:19092, 
+        LISTENER_DOCKER_EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >- 
+        LISTENER_DOCKER_INTERNAL:PLAINTEXT,
+        LISTENER_DOCKER_EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: LISTENER_DOCKER_INTERNAL
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CREATE_TOPICS: "cargo:5:1"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG4J_LOGGERS: >- 
+        kafka.controller=INFO,
+        kafka.producer.async.DefaultEventHandler=INFO,
+        state.change.logger=INFO
+    ports:
+    - 9092:9092
+    depends_on:
+    - zookeeper
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+    - back-tier
+
+  kafka_exporter:
+    image: danielqsj/kafka-exporter
+    ports: 
+      - "9308:9308"
+    depends_on:
+      - kafka
+    restart: always
+    command: --kafka.server=kafka:19092
+    networks:
+      - back-tier
+
+
