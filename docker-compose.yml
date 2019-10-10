@@ -104,7 +104,9 @@ services:
     restart: always
 
   postgresql-server:
-    image: library/postgres:9.6
+    build:
+      context: postgres
+      dockerfile: Dockerfile
     ports:
       - 5432:5432
     networks:
@@ -165,6 +167,7 @@ services:
     networks:
       - back-tier
 
+
   kafka_consumer:
     build:
       context: kafka
@@ -183,7 +186,7 @@ services:
     networks:
       - back-tier
 
-
+      
   kafka:
     container_name: kafka
     image: wurstmeister/kafka
@@ -225,4 +228,14 @@ services:
     networks:
       - back-tier
 
-
+  springboot:
+    build:
+      context: springboot
+      dockerfile: Dockerfile
+    ports:
+      - "8086:8086" 
+    networks:
+      - back-tier
+    links:
+      - postgresql-server
+    
